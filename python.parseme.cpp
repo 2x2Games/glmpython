@@ -3,10 +3,29 @@
 #include "../glm/glm.hpp"
 #include <sstream>
 #include "../glm/ext.hpp"
+#include "../glm/gtc/noise.hpp"
 
 #include "python.hpp"
 
 namespace glmpython {
+
+/*
+https://docs.python.org/3/c-api/buffer.html
+
+PyBuffer struct has member arrays shape and strides which should be allocated and filled in the getbuffer function.
+This memory should later be released in releasebuffer function.
+
+Since shape and strides aren't arrays but numbers for glm objects, it would be wasteful to do all these allocations and deletes 
+each time a buffer is requested.
+
+Also since the documentation guarantees that shape and strides are read only, we can just set them to point to a static array.
+Hence the horrible constants_array.
+
+By Jure.
+*/
+static Py_ssize_t constants_array[15] = {
+    0,1,2,3,4,5,6,7,8,9,10,11,12,13,14
+};
 
 /* * * Header * * */
 /*$ MATRIX $*/
@@ -27,8 +46,8 @@ static PyObject *glm_${p}mat${n}_nb_inplace_multiply(PyObject *, PyObject *);
 static PyObject *glm_${p}mat${n}_nb_inplace_true_divide(PyObject *, PyObject *);
 
 static Py_ssize_t glm_${p}mat${n}_sq_length(PyObject *);
-static PyObject *glm_${p}mat${n}_sq_item(PyObject *, Py_ssize_t);
-static int glm_${p}mat${n}_sq_ass_item(PyObject *, Py_ssize_t, PyObject *);
+static PyObject *glm_${p}mat${n}_sq_item(PyObject *, glm::length_t);
+static int glm_${p}mat${n}_sq_ass_item(PyObject *, glm::length_t, PyObject *);
 
 static PyObject *glm_${p}mat${n}_tp_repr(PyObject *);
 static int glm_${p}mat${n}_tp_init(PyObject *, PyObject *, PyObject *);
@@ -68,8 +87,8 @@ static PyObject *glm_${p}vec${n}_nb_inplace_floor_divide(PyObject *, PyObject *)
 $?}
 
 static Py_ssize_t glm_${p}vec${n}_sq_length(PyObject *);
-static PyObject *glm_${p}vec${n}_sq_item(PyObject *, Py_ssize_t);
-static int glm_${p}vec${n}_sq_ass_item(PyObject *, Py_ssize_t, PyObject *);
+static PyObject *glm_${p}vec${n}_sq_item(PyObject *, glm::length_t);
+static int glm_${p}vec${n}_sq_ass_item(PyObject *, glm::length_t, PyObject *);
 
 static PyObject *glm_${p}vec${n}_tp_repr(PyObject *);
 static PyObject *glm_${p}vec${n}_tp_getattro(PyObject *, PyObject *);
@@ -144,7 +163,7 @@ PySequenceMethods glm_${p}mat${n}_SequenceMethods = {
 static
 PyBufferProcs glm_${p}mat${n}_BufferMethods = {
 	(getbufferproc)glm_${p}mat${n}_bf_getbuffer,
-	NULL,
+    NULL
 };
 
 // ${p}mat${n} Methods
@@ -309,16 +328,64 @@ PySequenceMethods glm_${p}vec${n}_SequenceMethods = {
 static
 PyBufferProcs glm_${p}vec${n}_BufferMethods = {
 	(getbufferproc)glm_${p}vec${n}_bf_getbuffer,
-	NULL,
+	NULL
 };
 
 // ${p}vec${n} Methods
 
 /*$ VECTOR_FUNCTION $*/
-static
-PyObject * glm_${p}vec${n}_function_${func}(PyObject *self) {
-	PyErr_SetString(PyExc_NotImplementedError, "Function not ported.");
-	return NULL;
+
+$?{args
+    static PyObject* glm_${p}vec${n}_function_${func}(PyObject *self, PyObject *other) {
+$??{
+    static PyObject* glm_${p}vec${n}_function_${func}(PyObject *self) {
+$?}
+
+$?{args
+/*$ {len(args)} $*/
+	${'PyObject *' if isinstance(args[I], str) else args[I].__name__} argument${I};
+/*$ $*/
+	
+	if(!PyArg_ParseTuple(other, "${''.join('f' if t == float else 'i' if t == int else 'O' for t in args)}:${func}"
+/*$ {len(args)} $*/
+	, &argument${I}
+/*$ $*/
+	))
+		return NULL;
+	
+/*$ {len(args)} $*/
+// $?{isinstance(args[I], str)
+	// if(1 != PyObject_IsInstance(argument${I}, (PyObject *)&glm_${args[I]}Type)) {
+		// std::stringstream ss;
+		// ss << "Argument ${I + 1} must be of type '${'glm.' + args[I] if isinstance(args[I], str) else args[I].__name__}' not '" << Py_TYPE(argument${I})->tp_name << "'.";
+		// std::string s = ss.str();
+		// PyErr_SetString(PyExc_TypeError, s.c_str());
+		// return NULL;
+	// }
+// $?}
+/*$ $*/
+$?}
+
+$?{p == 'i'
+    PyErr_SetString(PyExc_TypeError, "${func}() only supported for floating point vectors.");
+    return NULL;
+$??{
+    $?{func == 'length'
+        return PyFloat_FromDouble(static_cast<double>(glm::${func}(glm_${p}vec${n}Data(self))));
+    $??{func == 'normalize'
+        const glm::${p}vec${n} computed = glm::${func}(glm_${p}vec${n}Data(self));
+        return glm_${p}vec${n}New(computed);
+    $??{func == 'dot'
+        return PyFloat_FromDouble(static_cast<double>(glm::${func}(glm_${p}vec${n}Data(self), glm_${p}vec${n}Data(argument0))));
+    $??{func == 'cross' and n == 3
+        PyObject *result = PyObject_CallObject((PyObject *)Py_TYPE(self), NULL);
+		((glm_${p}vec${n} *)result)->vec = glm::${func}(glm_${p}vec${n}Data(self), glm_${p}vec${n}Data(argument0));
+        return result;
+    $??{
+        PyErr_SetString(PyExc_TypeError, "${func}() not supported for these types.");
+        return NULL;
+    $?}
+$?}
 }
 /*$ $*/
 
@@ -329,7 +396,7 @@ PyDoc_STRVAR(glm_${p}vec${n}_function_${func}__doc__, "${func_doc}");
 static
 PyMethodDef glm_${p}vec${n}Methods[] = {
 /*$ VECTOR_FUNCTION $*/
-	{"${func}", (PyCFunction) glm_${p}vec${n}_function_${func}, ${'METH_NOARGS'}, glm_${p}vec${n}_function_${func}__doc__},
+	{"${func}", (PyCFunction) glm_${p}vec${n}_function_${func}, ${'METH_NOARGS' if not args else 'METH_VARARGS'}, glm_${p}vec${n}_function_${func}__doc__},
 /*$ $*/
 	{NULL, NULL},
 };
@@ -612,6 +679,10 @@ $??{type == 'float'
 		((glm_${p}mat${n} *)result)->mat = (float)PyFloat_AsDouble(self) * ((glm_${p}mat${n} *)other)->mat;
 $?}
 	}
+    else if(1 == PyObject_IsInstance(other, (PyObject *)&glm_${p}vec${rows}Type)) {
+        result = PyObject_CallObject((PyObject *)Py_TYPE(other), NULL);
+		((glm_${p}vec${cols} *)result)->vec = ((glm_${p}mat${n} *)self)->mat * ((glm_${p}vec${rows} *)other)->vec;
+    }
 $?{cols == rows
 	else if(1 == PyObject_IsInstance(other, (PyObject *)&glm_${p}mat${n}Type)) {
 		result = PyObject_CallObject((PyObject *)Py_TYPE(self), NULL);
@@ -774,7 +845,7 @@ Py_ssize_t glm_${p}mat${n}_sq_length(PyObject *self) {
 }
 
 static
-PyObject *glm_${p}mat${n}_sq_item(PyObject *self, Py_ssize_t item) {
+PyObject *glm_${p}mat${n}_sq_item(PyObject *self, glm::length_t item) {
 	PyObject *result;
 	if(item >= ${cols * rows}) {
 		PyErr_SetString(PyExc_IndexError, "Out of range.");
@@ -790,7 +861,7 @@ $?}
 }
 
 static
-int glm_${p}mat${n}_sq_ass_item(PyObject *self, Py_ssize_t item, PyObject *value) {
+int glm_${p}mat${n}_sq_ass_item(PyObject *self, glm::length_t item, PyObject *value) {
 	if(item >= ${cols * rows}) {
 		PyErr_SetString(PyExc_IndexError, "Out of range.");
 		return -1;
@@ -863,18 +934,29 @@ $?}
 			return 0;
 		}
 	}
-	
+    
+$?{rows == cols
+/*$ {(2, 3, 4)} $*/
+$?{I >= int(n)
+    if(PyObject_IsInstance(args, (PyObject *)&glm_${p}mat${I}Type) == 1) {
+        real->mat = glm::${p}mat${n}(((glm_${p}mat${I} *)args)->mat);
+        return 0;
+    }
+$?}
+/*$ $*/
+$?}
+
 	real->mat = glm::${p}mat${n}();
 	
 	PyObject *tmp;
-	Py_ssize_t i;
-	Py_ssize_t at = 0;
+	glm::length_t i;
+	glm::length_t at = 0;
 
 	for(i = 0; i < argsize; i++) {
 		tmp = PyTuple_GET_ITEM(args, i);
 
 		if(PyBytes_CheckExact(tmp)) {
-			size_t len = PyBytes_Size(tmp) / sizeof(${type});
+			glm::length_t len = static_cast<glm::length_t>(PyBytes_Size(tmp)) / sizeof(${type});
 			
 			if(at + len > ${cols * rows - 1})
 				len = ${cols * rows} - at;
@@ -928,8 +1010,35 @@ $?}
 }
 
 int glm_${p}mat${n}_bf_getbuffer(PyObject *self, Py_buffer *view, int flags) {
-	PyBuffer_FillInfo(view, self, glm::value_ptr(((glm_${p}mat${n} *)self)->mat), sizeof(${type}) * ${cols * rows}, 1, PyBUF_SIMPLE);
-	return 0;
+    if (view == NULL) {
+        PyErr_SetString(PyExc_ValueError, "NULL view in glm_${p}mat${n}_bf_getbuffer");
+        return -1;
+    }
+
+    void *buf = (void*)glm::value_ptr(((glm_${p}mat${n} *)self)->mat);
+    const int ret = PyBuffer_FillInfo(view, self, buf, sizeof(${type}) * ${rows * cols}, 0, flags);
+    
+    if(ret < 0) {
+        PyErr_SetString(PyExc_BufferError, "Buffer error in glm_${p}mat${n}_bf_getbuffer");
+        view->obj = NULL;
+        return -1;
+    }
+    
+    const Py_ssize_t shape = ${rows * cols};
+    const Py_ssize_t strides = sizeof(${type});
+
+    view->obj = self;
+    view->ndim = 1;
+    view->len = shape * sizeof(${type});
+    view->shape = constants_array+shape;
+    view->strides = constants_array+strides;
+    view->itemsize = sizeof(${type});
+$?{type == 'float'
+    view->format = "f";
+$??{type == 'int'
+    view->format = "i";
+$?}
+    return 0;
 }
 
 PyObject *glm_${p}mat${n}_tp_richcompare(PyObject *self, PyObject *other, int op) {
@@ -1293,7 +1402,7 @@ Py_ssize_t glm_${p}vec${n}_sq_length(PyObject *self) {
 }
 
 static
-PyObject *glm_${p}vec${n}_sq_item(PyObject *self, Py_ssize_t item) {
+PyObject *glm_${p}vec${n}_sq_item(PyObject *self, glm::length_t item) {
 	PyObject *result;
 	if(item >= ${n}) {
 		PyErr_SetString(PyExc_IndexError, "Out of range.");
@@ -1309,7 +1418,7 @@ $?}
 }
 
 static
-int glm_${p}vec${n}_sq_ass_item(PyObject *self, Py_ssize_t item, PyObject *value) {
+int glm_${p}vec${n}_sq_ass_item(PyObject *self, glm::length_t item, PyObject *value) {
 	if(item >= ${n}) {
 		PyErr_SetString(PyExc_IndexError, "Out of range.");
 		return -1;
@@ -1386,14 +1495,14 @@ $?}
 	real->vec = glm::${p}vec${n}();
 	
 	PyObject *tmp;
-	Py_ssize_t i;
-	Py_ssize_t at = 0;
+	glm::length_t i;
+	glm::length_t at = 0;
 
 	for(i = 0; i < argsize; i++) {
 		tmp = PyTuple_GET_ITEM(args, i);
 		
 		if(PyBytes_CheckExact(tmp)) {
-			size_t len = PyBytes_Size(tmp) / sizeof(${type});
+			glm::length_t len = static_cast<glm::length_t>(PyBytes_Size(tmp)) / sizeof(${type});
 			
 			if(at + len > ${n - 1})
 				len = ${n} - at;
@@ -1617,8 +1726,35 @@ $?}
 }
 
 int glm_${p}vec${n}_bf_getbuffer(PyObject *self, Py_buffer *view, int flags) {
-	PyBuffer_FillInfo(view, self, glm::value_ptr(((glm_${p}vec${n} *)self)->vec), sizeof(${type}) * ${n}, 1, PyBUF_SIMPLE);
-	return 0;
+    if (view == NULL) {
+        PyErr_SetString(PyExc_ValueError, "NULL view in glm_${p}vec${n}_bf_getbuffer");
+        return -1;
+    }
+
+    void *buf = (void*)glm::value_ptr(((glm_${p}vec${n} *)self)->vec);
+    const int ret = PyBuffer_FillInfo(view, self, buf, sizeof(${type}) * ${n}, 0, flags);
+    
+    if(ret < 0) {
+        PyErr_SetString(PyExc_BufferError, "Buffer error in glm_${p}vec${n}_bf_getbuffer");
+        view->obj = NULL;
+        return -1;
+    }
+    
+    const Py_ssize_t shape = ${n};
+    const Py_ssize_t strides = sizeof(${type});
+
+    view->obj = self;
+    view->ndim = 1;
+    view->len = shape * sizeof(${type});
+    view->shape = constants_array+shape;
+    view->strides = constants_array+strides;
+    view->itemsize = sizeof(${type});
+$?{type == 'float'
+    view->format = "f";
+$??{type == 'int'
+    view->format = "i";
+$?}
+    return 0;
 }
 
 PyObject *glm_${p}vec${n}_tp_richcompare(PyObject *self, PyObject *other, int op) {
@@ -1810,10 +1946,14 @@ $?{isinstance(args[I], str)
 $?}
 /*$ $*/
 $?}
-	
-	glm::${p}mat${n} computed;
+
+$?{func == 'mat3'
+	glm::${p}mat3 computed;
+$??{
+    glm::${p}mat${n} computed;
+$?}
 	PyObject *result;
-	computed = glm${path}::${func}(glm_${p}mat${n}Data(self)
+	computed = glm::${func}(glm_${p}mat${n}Data(self)
 /*$ {len(args)} $*/
 $?{isinstance(args[I], str)
 	, glm_${args[I]}Data(argument${I})
@@ -1822,9 +1962,12 @@ $??{
 $?}
 /*$ $*/
 	);
-	
-	result = glm_${p}mat${n}New(computed);
-	
+    
+$?{func == 'mat3'
+	result = glm_${p}mat3New(computed);
+$??{
+    result = glm_${p}mat${n}New(computed);
+$?}
 	return result;
 }
 $?}
@@ -1833,74 +1976,138 @@ $?}
 
 /* * * Functions * * */
 
-/*$ MATRIX_FUNCTION $*/
-PyObject *glm_function_${func}(PyObject *) {
-	
-	PyErr_SetString(PyExc_TypeError, "GLM functions only accept GLM types...or numbers.");
-	return NULL;
-}
-/*$ $*/
-
-/*$ VECTOR_FUNCTION $*/
-PyObject *glm_function_${func}(PyObject *) {
-	
-	PyErr_SetString(PyExc_TypeError, "GLM functions only accept GLM types...or numbers.");
-	return NULL;
-}
-/*$ $*/
-
 /*$ NUMBER_FUNCTION $*/
 PyObject *glm_function_${func}(PyObject *module, PyObject *args) {
 /*$ {argc + argoc} $*/
+$?{type == 'float'
 	${type} a${I};
+$??{
+    PyObject *a${I};
+$?}
 /*$ $*/
-	
+
 	if(!PyArg_ParseTuple(args, "${p * argc}|${p * argoc}:${func}",
 /*$ {argc + argoc} $*/
 	&a${I}${', ' if I + 1 < argc + argoc else ''}
 /*$ $*/
 	))
 		return NULL;
-	
-	PyObject *result = PyObject_CallObject((PyObject *)&glm_${returns}Type, NULL);
-	
-	((glm_${returns} *)result)->${base} = 
-	glm${path}::${func}<${type}>(
-/*$ {argc + argoc} $*/
-	a${I}${', ' if I + 1 < argc + argoc else ''}
-/*$ $*/
-);
-	
-	return result;
+        
+    $?{returns == 'float'
+        return PyFloat_FromDouble(static_cast<double>(glm::${func_glm_name}(
+        /*$ {argc + argoc} $*/
+            $?{type == 'float'
+                a${I}${', ' if I + 1 < argc + argoc else ''}
+            $??{
+                glm_vec2Data(a${I})${', ' if I + 1 < argc + argoc else ''}
+            $?}
+                
+        /*$ $*/
+        )));
+    $??{
+        PyObject *result = PyObject_CallObject((PyObject *)&glm_${returns}Type, NULL);
+        ((glm_${returns} *)result)->${base} = glm::${func_glm_name}(
+        /*$ {argc + argoc} $*/
+        $?{type == 'float'
+            a${I}${', ' if I + 1 < argc + argoc else ''}
+        $??{
+            glm_${type}Data(a${I})${', ' if I + 1 < argc + argoc else ''}
+        $?}
+        /*$ $*/
+        );
+        return result;
+    $?}
 }
 
 /*$ $*/
 
+PyObject *glm_function_project(PyObject *module, PyObject *args) {
+    PyObject *a0;
+    PyObject *a1;
+    PyObject *a2;
+    PyObject *a3;
+
+	if(!PyArg_ParseTuple(args, "OOOO|:project",
+	&a0, 
+	&a1, 
+	&a2,
+    &a3
+	))
+		return NULL;
+        
+        PyObject *result = PyObject_CallObject((PyObject *)&glm_vec3Type, NULL);
+        ((glm_vec3 *)result)->vec = glm::project(
+            glm_vec3Data(a0), 
+            glm_mat4Data(a1), 
+            glm_mat4Data(a2),
+            glm_vec4Data(a3)
+        );
+        return result;
+}
+
+PyObject *glm_function_unProject(PyObject *module, PyObject *args) {
+    PyObject *a0;
+    PyObject *a1;
+    PyObject *a2;
+    PyObject *a3;
+
+	if(!PyArg_ParseTuple(args, "OOOO|:unProject",
+	&a0, 
+	&a1, 
+	&a2,
+    &a3
+	))
+		return NULL;
+        
+        PyObject *result = PyObject_CallObject((PyObject *)&glm_vec3Type, NULL);
+        ((glm_vec3 *)result)->vec = glm::unProject(
+            glm_vec3Data(a0), 
+            glm_mat4Data(a1), 
+            glm_mat4Data(a2),
+            glm_vec4Data(a3)
+        );
+        return result;
+}
+
+PyObject *glm_function_pickMatrix(PyObject *module, PyObject *args) {
+    PyObject *a0;
+    PyObject *a1;
+    PyObject *a2;
+
+	if(!PyArg_ParseTuple(args, "OOO|:unProject",
+	&a0, 
+	&a1, 
+	&a2
+	))
+		return NULL;
+        
+        PyObject *result = PyObject_CallObject((PyObject *)&glm_mat4Type, NULL);
+        ((glm_mat4 *)result)->mat = glm::pickMatrix(
+            glm_vec2Data(a0), 
+            glm_vec2Data(a1), 
+            glm_vec4Data(a2)
+        );
+        return result;
+}
+
 /* * * GLM Module * * */
-
-/*$ VECTOR_FUNCTION $*/
-PyDoc_STRVAR(glm_function_${func}__doc__, "${func_doc}");
-/*$ $*/
-
-/*$ MATRIX_FUNCTION $*/
-PyDoc_STRVAR(glm_function_${func}__doc__, "${func_doc}");
-/*$ $*/
 
 /*$ NUMBER_FUNCTION $*/
 PyDoc_STRVAR(glm_function_${func}__doc__, "${func_doc}");
 /*$ $*/
+
+PyDoc_STRVAR(glm_function_project__doc__, "Map the specified object coordinates (obj.x, obj.y, obj.z) into window coordinates.");
+PyDoc_STRVAR(glm_function_unProject__doc__, "Map the specified window coordinates (win.x, win.y, win.z) into object coordinates.");
+PyDoc_STRVAR(glm_function_pickMatrix__doc__, "Define a picking region From GLM_GTC_matrix_transform extension.");
 
 static
 PyMethodDef glmmodule_methods[] = {
-/*$ VECTOR_FUNCTION $*/
-	{"${func}", (PyCFunction) glm_function_${func}, METH_O, glm_function_${func}__doc__},
-/*$ $*/
-/*$ MATRIX_FUNCTION $*/
-	{"${func}", (PyCFunction) glm_function_${func}, METH_VARARGS, glm_function_${func}__doc__},
-/*$ $*/
 /*$ NUMBER_FUNCTION $*/
 	{"${func}", (PyCFunction) glm_function_${func}, METH_VARARGS, glm_function_${func}__doc__},
 /*$ $*/
+    {"project", (PyCFunction) glm_function_project, METH_VARARGS, glm_function_project__doc__},
+    {"un_project", (PyCFunction) glm_function_unProject, METH_VARARGS, glm_function_unProject__doc__},
+    {"pick_matrix", (PyCFunction) glm_function_pickMatrix, METH_VARARGS, glm_function_pickMatrix__doc__},
 	{NULL, NULL},
 };
 
